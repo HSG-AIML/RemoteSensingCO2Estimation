@@ -12,3 +12,6 @@ Quantifying GHG emissions is crucial for accurate predictions of climate effects
 In this work, we propose an end-to-end method to predict power generation rates for fossil fuel power plants from satellite images based on which we estimate GHG emission rates. We present a multitask deep learning approach able to simultaneously predict: (i) the pixel-area covered by plumes from a single satellite image of a power plant, (ii) the type of fired fuel, and (iii) the power generation rate. We then convert the predicted power generation rate into estimates for the rate at which CO<sub>2</sub> is being emitted.
 Experimental results show that our model approach allows us to estimate the power generation rate of a power plant to within 139 MW (MAE, for a mean sample power plant capacity of 1177 MW) from a single satellite image and CO<sub>2</sub> emission rates to within 311 t/h.
 This multitask learning approach improves the power generation estimation MAE by 39% compared to a single-task network trained on the same dataset.
+
+
+The dataset is available on [zenodo.org](https://doi.org/10.5281/zenodo.5644746)
