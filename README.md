@@ -14,4 +14,4 @@ Experimental results show that our model approach allows us to estimate the powe
 This multitask learning approach improves the power generation estimation MAE by 39% compared to a single-task network trained on the same dataset.
 
 
-The dataset is available on [zenodo.org](https://doi.org/10.5281/zenodo.5644746)
+The dataset is available on [zenodo.org](https://doi.org/10.5281/zenodo.5874537)

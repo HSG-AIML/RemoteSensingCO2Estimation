@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 from torch import nn, optim
 from tqdm.autonotebook import tqdm
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, ConcatDataset, RandomSampler
 
 import argparse
 from sklearn.metrics import jaccard_score
@@ -25,31 +25,39 @@ def multi_acc(y_pred, y_test):
     return acc
 
 
-def train_model(model, params, opt, channels, datadir, seglabeldir, reg_data, checkpoint_dir):
+def train_model(model, params, opt, channels, datadir, seglabeldir, reg_file, checkpoint_dir):
     """Wrapper function for model training.
     :param model: model instance
     :param params: parameters
-    :param datadir: path to satellite images
     :param opt: optimizer instance
     :param channels: list of channels indices
-    :param checkpoint_dir: path to model checkpoints
+    :param datadir: path to satellite images
     :param seglabeldir: path to segmentation labels
-    :param reg_data: path to csv file for regression"""
+    :param reg_file: path to csv file for regression
+    :param checkpoint_dir: path to model checkpoints"""
 
     exp_out_dir = os.path.join(checkpoint_dir, params.exp_name)
+
     os.makedirs(os.path.join(exp_out_dir, 'regression_checkpoints'), exist_ok=True)
     os.makedirs(os.path.join(exp_out_dir, 'segmentation_checkpoints'), exist_ok=True)
+    os.makedirs(os.path.join(exp_out_dir, 'classification_checkpoints'), exist_ok=True)
 
-    reg_data = pd.read_csv(os.path.join(reg_data, 'reg_co2_data.csv'))
+    reg_data = pd.read_csv(reg_file)
 
     # create dataset
-    data_train = create_dataset(
-        datadir=datadir, seglabeldir=os.path.join(seglabeldir, 'training/'),
-        reg_data=reg_data, mult=1, train=True, channels=channels)
+    data_train_120x120 = create_dataset(
+        datadir=os.path.join(datadir, 'training/120x120/'), seglabeldir=os.path.join(seglabeldir, 'training/120x120/'),
+        reg_data=reg_data, mult=4, train=True, channels=channels)
+
+    data_train_300x300 = create_dataset(
+        datadir=os.path.join(datadir, 'training/300x300/'), seglabeldir=os.path.join(seglabeldir, 'training/300x300/'),
+        reg_data=reg_data, mult=4, train=True, channels=channels, size=300)
 
     data_val = create_dataset(
-        datadir=datadir, seglabeldir=os.path.join(seglabeldir, 'validation/'),
-        reg_data=reg_data, mult=1, channels=channels)  # reg_data=reg_data
+        datadir=os.path.join(datadir, 'validation/'), seglabeldir=os.path.join(seglabeldir, 'validation/'),
+        reg_data=reg_data, mult=1, channels=channels)
+
+    data_train = ConcatDataset([data_train_120x120, data_train_300x300])
 
     # draw random subsamples
     train_sampler = RandomSampler(data_train, replacement=True, num_samples=int(2 * len(data_train) / 3))
@@ -67,11 +75,15 @@ def train_model(model, params, opt, channels, datadir, seglabeldir, reg_data, ch
     loss_c = nn.CrossEntropyLoss()  # classification loss
     loss_s = nn.BCEWithLogitsLoss()  # segmentation loss
 
+    scaling_factor = 0.001
+
+    w_seg, w_reg, w_cls = 0.15, scaling_factor * 0.7, scaling_factor * 0.15
+
     for epoch in range(params.ep):
 
         model.train()
 
-        train_loss_total, train_acc_total, train_bin_acc_total = 0, 0, 0
+        train_loss_total, train_bin_acc_total = 0, 0
         train_ious = []
         train_image_loss_total, train_gen_loss_total, train_bin_loss_total = 0, 0, 0
 
@@ -84,10 +96,10 @@ def train_model(model, params, opt, channels, datadir, seglabeldir, reg_data, ch
             e = batch['gen_output'].float().to(device)
             t = batch['type'].long().to(device)
 
-            output, reg_output, logits = model(x, w)
+            seg_output, reg_output, cls_output = model(x, w)
 
-            output_binary = np.zeros(output.shape)
-            output_binary[output.cpu().detach().numpy() >= 0] = 1
+            output_binary = np.zeros(seg_output.shape)
+            output_binary[seg_output.cpu().detach().numpy() >= 0] = 1
 
             # derive IoU values
             for j in range(y.shape[0]):
@@ -95,15 +107,16 @@ def train_model(model, params, opt, channels, datadir, seglabeldir, reg_data, ch
                 if (np.sum(output_binary[j][0]) != 0 and np.sum(y[j].cpu().detach().numpy()) != 0):
                     train_ious.append(z)
 
-            bin_acc = multi_acc(logits, t)
+            # classification accuracy
+            bin_acc = multi_acc(cls_output, t)
             train_bin_acc_total += bin_acc
 
             # derive loss
-            loss_image = loss_s(output, y.unsqueeze(dim=1))
+            loss_image = loss_s(seg_output, y.unsqueeze(dim=1))
             loss_gen = loss_r(reg_output, e.unsqueeze(dim=1))
-            loss_bin = loss_c(logits, t)
+            loss_bin = loss_c(cls_output, t)
 
-            loss_epoch = loss_image + loss_gen + loss_bin
+            loss_epoch = w_seg * loss_image + w_reg * loss_gen + w_cls * loss_bin
 
             train_image_loss_total += loss_image.item()
             train_gen_loss_total += loss_gen.item()
@@ -123,57 +136,59 @@ def train_model(model, params, opt, channels, datadir, seglabeldir, reg_data, ch
         # evaluation
         model.eval()
 
-        val_loss_total, val_acc_total, val_bin_acc_total = 0, 0, 0
+        val_loss_total, val_bin_acc_total = 0, 0
         val_ious = []
         val_image_loss_total, val_gen_loss_total, val_bin_loss_total = 0, 0, 0
 
         progress = tqdm(enumerate(val_dl), desc="val Loss: ",
                         total=len(val_dl))
 
-        for j, batch in progress:
-            x = batch['img'].float().to(device)
-            w = batch['weather'].float().to(device)
-            y = batch['fpt'].float().to(device)
-            e = batch['gen_output'].float().to(device)
-            t = batch['type'].long().to(device)
+        with torch.no_grad():
+            for j, batch in progress:
+                x = batch['img'].float().to(device)
+                w = batch['weather'].float().to(device)
+                y = batch['fpt'].float().to(device)
+                e = batch['gen_output'].float().to(device)
+                t = batch['type'].long().to(device)
 
-            output, reg_output, logits = model(x, w)
+                seg_output, reg_output, cls_output = model(x, w)
 
-            bin_acc = multi_acc(logits, t)
-            val_bin_acc_total += bin_acc
+                # classification accuracy
+                bin_acc = multi_acc(cls_output, t)
+                val_bin_acc_total += bin_acc
 
-            # derive loss
-            loss_image = loss_s(output, y.unsqueeze(dim=1))
-            loss_bin = loss_c(logits, t)
-            loss_gen = loss_r(reg_output, e.unsqueeze(dim=1))
+                # derive losses
+                loss_image = loss_s(seg_output, y.unsqueeze(dim=1))
+                loss_bin = loss_c(cls_output, t)
+                loss_gen = loss_r(reg_output, e.unsqueeze(dim=1))
 
-            loss_epoch = loss_image + loss_gen + loss_bin
+                loss_epoch = w_seg * loss_image + w_reg * loss_gen + w_cls * loss_bin
 
-            val_loss_total += loss_epoch.item()
-            val_image_loss_total += loss_image.item()
-            val_bin_loss_total += loss_bin.item()
-            val_gen_loss_total += loss_gen.item()
+                val_loss_total += loss_epoch.item()
+                val_image_loss_total += loss_image.item()
+                val_bin_loss_total += loss_bin.item()
+                val_gen_loss_total += loss_gen.item()
 
-            # derive binary segmentation map from prediction
-            output_binary = np.zeros(output.shape)
-            output_binary[output.cpu().detach().numpy() >= 0] = 1
+                # derive binary segmentation map from prediction
+                output_binary = np.zeros(seg_output.shape)
+                output_binary[seg_output.cpu().detach().numpy() >= 0] = 1
 
-            # derive IoU values
-            for k in range(y.shape[0]):
-                z = jaccard_score(y[k].flatten().cpu().detach().numpy(), output_binary[k][0].flatten())
-                if (np.sum(output_binary[k][0]) != 0 and np.sum(y[k].cpu().detach().numpy()) != 0):
-                    val_ious.append(z)
+                # derive IoU values
+                for k in range(y.shape[0]):
+                    z = jaccard_score(y[k].flatten().cpu().detach().numpy(), output_binary[k][0].flatten())
+                    if (np.sum(output_binary[k][0]) != 0 and np.sum(y[k].cpu().detach().numpy()) != 0):
+                        val_ious.append(z)
 
-            progress.set_description("val Loss: {:.4f}".format(
-                val_loss_total / (j + 1)))
+                progress.set_description("val Loss: {:.4f}".format(
+                    val_loss_total / (j + 1)))
 
         print((
-            "Epoch {:d}: total train loss={:.3f}, bce loss={:.3f}, mse loss={:.3f}, bin loss={:.3f}, total val loss={:.3f}, "
-            " bce loss={:.3f}, mse loss={:.3f}, bin loss={:.3f}, train iou={:.3f}, val iou={:.3f}, train acc={:.3f}, val acc={:.3f}, bin train acc={:.3f}, bin val acc={:.3f}").format(
+            "Epoch {:d}: total train loss={:.3f}, seg loss={:.3f}, reg loss={:.3f}, cls loss={:.3f}, total val loss={:.3f}, "
+            " seg loss={:.3f}, reg loss={:.3f}, cls loss={:.3f}, train iou={:.3f}, val iou={:.3f}, train cls acc={:.3f}, val cls acc={:.3f}").format(
             epoch + 1, train_loss_total / (i + 1), train_image_loss_total / (i + 1), train_gen_loss_total / (i + 1),
             train_bin_loss_total / (i + 1), val_loss_total / (j + 1), val_image_loss_total / (j + 1),
             val_gen_loss_total / (j + 1), val_bin_loss_total / (j + 1), np.average(train_ious), np.average(val_ious),
-            train_acc_total / (i + 1), val_acc_total / (j + 1), train_bin_acc_total / (i + 1), val_bin_acc_total / (j + 1)))
+            train_bin_acc_total / (i + 1), val_bin_acc_total / (j + 1)))
 
         if np.average(val_ious) >= best_val_iou:
             best_val_iou = np.average(val_ious)
@@ -207,7 +222,7 @@ def main():
     parser.add_argument('-bs', type=int, nargs='?',
                         default=32, help='Batch size')
     parser.add_argument('-lr', type=float,
-                        nargs='?', default=0.7, help='Learning rate')
+                        nargs='?', default=0.1, help='Learning rate')
     parser.add_argument('-mo', type=float,
                         nargs='?', default=0.7, help='Momentum')
     parser.add_argument('-exp_name', type=str, default='',
@@ -217,7 +232,7 @@ def main():
 
     args = parser.parse_args()
 
-    channels = [int(c) for c in args.channels.split(',')] 
+    channels = [int(c) for c in args.channels.split(',')]
 
     model = MultiTaskModel(n_channels=len(channels), n_classes=1)
     model.to(device)
@@ -227,8 +242,8 @@ def main():
 
     # run training
     train_model(
-        model, args, opt, channels, datadir='path/to/images', seglabeldir='path/to/segmentation/labels',
-        reg_data='path/to/csv', checkpoint_dir='path/to/model/checkpoints')
+        model, args, opt, channels, datadir='data/images/', seglabeldir='data/segmentation_labels/',
+        reg_file='labels.csv', checkpoint_dir='checkpoints')
 
 
 if __name__ == '__main__':
