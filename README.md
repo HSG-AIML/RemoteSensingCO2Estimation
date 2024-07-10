@@ -1,6 +1,6 @@
 # Remote Sensing CO2 Estimation
 
-Code base for the paper *Multitask Learning for Estimating Power Plant Greenhouse Gas Emissions from Satellite Imagery*, presented at *Tackling Climate Change with Machine Learning* workshop at NeurIPS 2021
+Code base for the paper **Multitask Learning for Estimating Power Plant Greenhouse Gas Emissions from Satellite Imagery**, presented at *Tackling Climate Change with Machine Learning* workshop at NeurIPS 2021 and our follow-up paper **Physics-Guided Multitask Learning for Estimating Power Generation and CO2 Emissions From Satellite Imagery** published at IEEE Transactions of Geoscience and Remote Sensing, 2023 [[paper link](https://ieeexplore.ieee.org/stamp/stamp.jsp?arnumber=10153694)].
 
 ![example images](co2emissions.png "CO2 Emissions")
 
